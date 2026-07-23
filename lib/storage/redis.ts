@@ -22,6 +22,7 @@ export const KEYS = {
   user:      (id: string)     => `user:${id}`,
   rateLimit: (key: string)    => `rl:${key}`,
   collab:    (docName: string) => `collab:${docName}`,
+  signaling: (room: string)   => `signaling::${room}`,
 } as const
 
 // ── Singleton ─────────────────────────────────────────────────────────────────
