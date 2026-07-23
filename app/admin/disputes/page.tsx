@@ -14,19 +14,11 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
-import {
-  getDisputeSnapshot,
-  startMediation,
-  openCommunityVote,
-  resolveDisputeWithTemplate,
-  closeDispute,
-  computeDisputeAnalytics,
-  DISPUTE_RESOLUTION_TEMPLATES,
-  type DisputeRecord,
-} from '@/lib/services/dispute-service';
-import { Gavel, Users, BarChart3, ArrowLeft } from 'lucide-react';
+import { trpc } from '@/lib/trpc-client';
+import { DISPUTE_RESOLUTION_TEMPLATES } from '@/lib/services/dispute-service';
+import { Gavel, Users, BarChart3, ArrowLeft, Loader2 } from 'lucide-react';
 
-const STATUS_LABEL: Record<DisputeRecord['status'], string> = {
+const STATUS_LABEL: Record<string, string> = {
   filed: 'Filed',
   evidence: 'Evidence',
   mediation: 'Mediation',
@@ -43,29 +35,42 @@ export default function AdminDisputesPage() {
   const [resolutionExtra, setResolutionExtra] = useState('');
   const [templateId, setTemplateId] = useState(DISPUTE_RESOLUTION_TEMPLATES[0]?.id ?? '');
 
-  const snapshot =
-    typeof window !== 'undefined'
-      ? getDisputeSnapshot()
-      : { disputes: [] as DisputeRecord[] };
+  const { data: listData, isLoading: listLoading } = trpc.disputes.listDisputes.useQuery({});
+  const { data: analytics, isLoading: analyticsLoading } = trpc.disputes.computeAnalytics.useQuery();
 
-  const disputes = snapshot.disputes;
+  const disputes = listData?.disputes ?? [];
   const selected = disputes.find((d) => d.id === selectedId) ?? disputes[0] ?? null;
-
-  const analytics = computeDisputeAnalytics(disputes);
 
   const voteTally = selected
     ? selected.communityVotes.reduce(
         (acc, v) => {
-          acc[v.side] += 1;
+          acc[v.side as 'client' | 'creator'] += 1;
           return acc;
         },
         { client: 0, creator: 0 }
       )
     : { client: 0, creator: 0 };
 
+  const utils = trpc.useUtils();
+
   function refresh() {
+    utils.disputes.listDisputes.invalidate();
+    utils.disputes.computeAnalytics.invalidate();
     bump();
   }
+
+  const startMediationMut = trpc.disputes.startMediation.useMutation({
+    onSuccess: () => refresh(),
+  });
+  const openVoteMut = trpc.disputes.openCommunityVote.useMutation({
+    onSuccess: () => refresh(),
+  });
+  const resolveMut = trpc.disputes.resolveDispute.useMutation({
+    onSuccess: () => refresh(),
+  });
+  const closeMut = trpc.disputes.closeDispute.useMutation({
+    onSuccess: () => refresh(),
+  });
 
   return (
     <div className="max-w-5xl mx-auto space-y-6">
@@ -83,48 +88,54 @@ export default function AdminDisputesPage() {
         </h1>
         <p className="text-muted-foreground text-sm">
           Review cases, run mediation, optionally open advisory community votes, and resolve using
-          templates. Escrow actions are simulated.
+          templates.
         </p>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-4">
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium flex items-center gap-2">
-              <BarChart3 className="h-4 w-4" /> Open
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-2xl font-bold">{analytics.totalOpen}</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium">Mediation</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-2xl font-bold">{analytics.inMediation}</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium flex items-center gap-2">
-              <Users className="h-4 w-4" /> Community vote
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-2xl font-bold">{analytics.awaitingCommunity}</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium">Resolved (30d)</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-2xl font-bold">{analytics.resolvedLast30d}</p>
-          </CardContent>
-        </Card>
-      </div>
+      {analyticsLoading ? (
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin" /> Loading analytics…
+        </div>
+      ) : (
+        <div className="grid gap-4 sm:grid-cols-4">
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium flex items-center gap-2">
+                <BarChart3 className="h-4 w-4" /> Open
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <p className="text-2xl font-bold">{analytics?.totalOpen ?? 0}</p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium">Mediation</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <p className="text-2xl font-bold">{analytics?.inMediation ?? 0}</p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium flex items-center gap-2">
+                <Users className="h-4 w-4" /> Community vote
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <p className="text-2xl font-bold">{analytics?.awaitingCommunity ?? 0}</p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium">Resolved (30d)</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <p className="text-2xl font-bold">{analytics?.resolvedLast30d ?? 0}</p>
+            </CardContent>
+          </Card>
+        </div>
+      )}
 
       <div className="grid gap-6 lg:grid-cols-3">
         <Card className="lg:col-span-1">
@@ -133,26 +144,34 @@ export default function AdminDisputesPage() {
             <CardDescription>Select a dispute</CardDescription>
           </CardHeader>
           <CardContent className="space-y-2 max-h-[480px] overflow-y-auto">
-            {disputes.map((d) => (
-              <button
-                key={d.id}
-                type="button"
-                onClick={() => setSelectedId(d.id)}
-                className={`w-full text-left rounded-lg border p-3 text-sm transition-colors ${
-                  selected?.id === d.id
-                    ? 'border-primary bg-primary/5'
-                    : 'border-border hover:bg-secondary/50'
-                }`}
-              >
-                <div className="font-medium line-clamp-1">{d.title}</div>
-                <div className="text-xs text-muted-foreground mt-1 flex items-center gap-2">
-                  <Badge variant="outline" className="text-[10px]">
-                    {STATUS_LABEL[d.status]}
-                  </Badge>
-                  <span className="truncate">{d.id}</span>
-                </div>
-              </button>
-            ))}
+            {listLoading ? (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" /> Loading…
+              </div>
+            ) : disputes.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No disputes found.</p>
+            ) : (
+              disputes.map((d) => (
+                <button
+                  key={d.id}
+                  type="button"
+                  onClick={() => setSelectedId(d.id)}
+                  className={`w-full text-left rounded-lg border p-3 text-sm transition-colors ${
+                    selected?.id === d.id
+                      ? 'border-primary bg-primary/5'
+                      : 'border-border hover:bg-secondary/50'
+                  }`}
+                >
+                  <div className="font-medium line-clamp-1">{d.title}</div>
+                  <div className="text-xs text-muted-foreground mt-1 flex items-center gap-2">
+                    <Badge variant="outline" className="text-[10px]">
+                      {STATUS_LABEL[d.status] ?? d.status}
+                    </Badge>
+                    <span className="truncate">{d.id}</span>
+                  </div>
+                </button>
+              ))
+            )}
           </CardContent>
         </Card>
 
@@ -161,7 +180,7 @@ export default function AdminDisputesPage() {
             <CardTitle className="text-base">Case detail</CardTitle>
             <CardDescription>
               {selected
-                ? `${selected.filedByName} vs ${selected.counterpartyName}`
+                ? `${selected.filedByUserId} vs ${selected.counterpartyId ?? selected.creatorId}`
                 : 'No disputes loaded'}
             </CardDescription>
           </CardHeader>
@@ -173,29 +192,18 @@ export default function AdminDisputesPage() {
                 <div className="space-y-1 text-sm">
                   <p>
                     <span className="text-muted-foreground">Order ref:</span>{' '}
-                    {selected.relatedOrderId}
+                    {selected.escrowId}
                   </p>
                   <p>
                     <span className="text-muted-foreground">Category:</span> {selected.category}
                   </p>
                   <p className="pt-2">{selected.description}</p>
-                  {selected.escrow.held && (
+                  {selected.escrowAmountCents > 0 && (
                     <p className="text-amber-600 text-sm pt-2">
-                      Escrow hold (simulated): ${(selected.escrow.amountCents / 100).toFixed(2)}
+                      Escrow hold: ${(selected.escrowAmountCents / 100).toFixed(2)}
                     </p>
                   )}
                 </div>
-
-                {selected.mediationNotes.length > 0 && (
-                  <div>
-                    <p className="text-xs font-medium text-muted-foreground mb-1">Mediation notes</p>
-                    <ul className="list-disc pl-5 text-sm space-y-1">
-                      {selected.mediationNotes.map((n, i) => (
-                        <li key={i}>{n}</li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
 
                 <div>
                   <p className="text-xs font-medium text-muted-foreground mb-1">
@@ -218,12 +226,18 @@ export default function AdminDisputesPage() {
                   <Button
                     type="button"
                     size="sm"
+                    disabled={startMediationMut.isPending}
                     onClick={() => {
-                      startMediation(selected.id, 'admin', mediationNote.trim() || undefined);
+                      startMediationMut.mutate({
+                        disputeId: selected.id,
+                        note: mediationNote.trim() || undefined,
+                      });
                       setMediationNote('');
-                      refresh();
                     }}
                   >
+                    {startMediationMut.isPending ? (
+                      <Loader2 className="h-4 w-4 animate-spin mr-1" />
+                    ) : null}
                     Start / continue mediation
                   </Button>
                 </div>
@@ -232,11 +246,14 @@ export default function AdminDisputesPage() {
                   type="button"
                   variant="secondary"
                   size="sm"
+                  disabled={openVoteMut.isPending}
                   onClick={() => {
-                    openCommunityVote(selected.id);
-                    refresh();
+                    openVoteMut.mutate({ disputeId: selected.id });
                   }}
                 >
+                  {openVoteMut.isPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin mr-1" />
+                  ) : null}
                   Open community vote window
                 </Button>
 
@@ -263,27 +280,32 @@ export default function AdminDisputesPage() {
                   <div className="flex flex-wrap gap-2">
                     <Button
                       type="button"
+                      disabled={resolveMut.isPending}
                       onClick={() => {
-                        resolveDisputeWithTemplate(
-                          selected.id,
+                        resolveMut.mutate({
+                          disputeId: selected.id,
                           templateId,
-                          'Admin',
-                          resolutionExtra.trim() || undefined
-                        );
+                          extraSummary: resolutionExtra.trim() || undefined,
+                        });
                         setResolutionExtra('');
-                        refresh();
                       }}
                     >
+                      {resolveMut.isPending ? (
+                        <Loader2 className="h-4 w-4 animate-spin mr-1" />
+                      ) : null}
                       Apply template & resolve
                     </Button>
                     <Button
                       type="button"
                       variant="outline"
+                      disabled={closeMut.isPending}
                       onClick={() => {
-                        closeDispute(selected.id);
-                        refresh();
+                        closeMut.mutate({ disputeId: selected.id });
                       }}
                     >
+                      {closeMut.isPending ? (
+                        <Loader2 className="h-4 w-4 animate-spin mr-1" />
+                      ) : null}
                       Close case
                     </Button>
                   </div>
@@ -292,8 +314,8 @@ export default function AdminDisputesPage() {
                 <div>
                   <p className="text-xs font-medium text-muted-foreground mb-1">Timeline</p>
                   <ul className="text-xs space-y-1 max-h-40 overflow-y-auto border rounded-md p-2 bg-muted/30">
-                    {[...selected.timeline].reverse().map((t, i) => (
-                      <li key={i}>
+                    {selected.timeline.map((t) => (
+                      <li key={t.id}>
                         <span className="text-muted-foreground">
                           {new Date(t.at).toLocaleString()}
                         </span>{' '}

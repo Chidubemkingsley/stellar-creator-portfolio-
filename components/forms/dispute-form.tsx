@@ -15,14 +15,12 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import {
-  fileDispute,
   disputeFormInputSchema,
   toFileDisputeInput,
-  addEvidence,
   hashEvidenceBytes,
-  type DisputeRecord,
   type DisputeFormInput,
 } from '@/lib/services/dispute-service';
+import { trpc } from '@/lib/trpc-client';
 import { Loader2 } from 'lucide-react';
 
 type FormValues = DisputeFormInput;
@@ -34,11 +32,16 @@ export function DisputeForm({
 }: {
   userId: string;
   userName: string;
-  onFiled?: (d: DisputeRecord) => void;
+  onFiled?: (d: { id: string }) => void;
 }) {
   const [evidenceFile, setEvidenceFile] = useState<File | null>(null);
   const [evidenceNote, setEvidenceNote] = useState('');
   const [submitError, setSubmitError] = useState<string | null>(null);
+
+  const utils = trpc.useUtils();
+
+  const fileDisputeMut = trpc.disputes.fileDispute.useMutation();
+  const addEvidenceMut = trpc.disputes.addEvidence.useMutation();
 
   const {
     control,
@@ -66,22 +69,24 @@ export function DisputeForm({
     setSubmitError(null);
     try {
       const input = toFileDisputeInput(values);
-      const d = fileDispute(input, { userId, name: userName });
+      const d = await fileDisputeMut.mutateAsync(input);
+
       if (evidenceFile) {
         const buf = await evidenceFile.arrayBuffer();
         const sha256 = await hashEvidenceBytes(buf);
-        addEvidence(
-          d.id,
-          {
+        await addEvidenceMut.mutateAsync({
+          disputeId: d.id,
+          metadata: {
             fileName: evidenceFile.name,
             mimeType: evidenceFile.type || 'application/octet-stream',
             byteSize: evidenceFile.size,
             sha256,
             note: evidenceNote.trim() || undefined,
           },
-          { userId, label: userName }
-        );
+        });
       }
+
+      utils.disputes.listDisputes.invalidate();
       reset();
       setEvidenceFile(null);
       setEvidenceNote('');
@@ -191,8 +196,7 @@ export function DisputeForm({
           placeholder="0.00 — simulates hold when &gt; 0"
         />
         <p className="text-xs text-muted-foreground">
-          Enter dollars; we store cents internally. Funds stay simulated until live escrow is
-          connected.
+          Enter dollars; we store cents internally.
         </p>
         {errors.escrowDollars && (
           <p className="text-xs text-destructive">{errors.escrowDollars.message}</p>
@@ -203,8 +207,7 @@ export function DisputeForm({
         <div>
           <Label htmlFor="evidence">Evidence file (optional)</Label>
           <p className="text-xs text-muted-foreground mt-1">
-            We record a SHA-256 hash and metadata only in this demo; attach the real file to your
-            support ticket in production.
+            We record a SHA-256 hash and metadata. Attach the real file to your support ticket.
           </p>
         </div>
         <Input
@@ -224,8 +227,12 @@ export function DisputeForm({
         </div>
       </div>
 
-      <Button type="submit" disabled={isSubmitting} className="w-full sm:w-auto">
-        {isSubmitting ? (
+      <Button
+        type="submit"
+        disabled={isSubmitting || fileDisputeMut.isPending}
+        className="w-full sm:w-auto"
+      >
+        {isSubmitting || fileDisputeMut.isPending ? (
           <>
             <Loader2 className="mr-2 h-4 w-4 animate-spin" />
             Submitting…

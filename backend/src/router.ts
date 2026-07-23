@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { protectedProcedure, publicProcedure, router } from './trpc-setup';
 import { prisma } from '@/lib/prisma';
+import { disputeRouter } from './routers/dispute';
 
 // Root router with Prisma-backed queries
 export const appRouter = router({
@@ -308,6 +309,9 @@ export const appRouter = router({
         };
       }),
   }),
+
+  // Dispute resolution endpoints
+  disputes: disputeRouter,
 
   // Analytics endpoints
   analytics: router({
