@@ -6,12 +6,15 @@ export interface ZkProofResult {
   proof: object
   publicSignals: string[]
   nullifier: string
+  expiresAt?: string
 }
 
 export interface ZkReviewInput {
   credential: string
   subjectId: string
   rating: number
+  reviewerId: string
+  expiresAt: number
 }
 
 interface VKey {
@@ -57,6 +60,9 @@ export async function generateReviewProof(
   const witness = {
     credential: input.credential,
     subjectId: input.subjectId,
+    expiresAt: input.expiresAt.toString(),
+    rating: input.rating.toString(),
+    reviewerId: input.reviewerId,
   }
 
   onStatusChange?.('proving')
@@ -77,10 +83,11 @@ export async function generateReviewProof(
   }
 
   const nullifier = publicSignals[1]
+  const expiresAt = publicSignals[2]
 
   onStatusChange?.('verified')
 
-  return { proof, publicSignals, nullifier }
+  return { proof, publicSignals, nullifier, expiresAt }
 }
 
 export async function verifyProofLocally(result: ZkProofResult): Promise<boolean> {

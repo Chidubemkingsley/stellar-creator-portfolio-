@@ -7,7 +7,7 @@ describe('proofIsWellFormed', () => {
     const { proofIsWellFormed } = await import('@/lib/zk-review-proof')
     const result = {
       proof: { pi_a: ['1', '2'], pi_b: [['3', '4'], ['5', '6']], pi_c: ['7', '8'] },
-      publicSignals: ['commitment', 'nullifier'],
+      publicSignals: ['commitment', 'nullifier', 'expiresAt', 'rating', 'reviewerId'],
       nullifier: 'abc123',
     }
     expect(proofIsWellFormed(result)).toBe(true)
@@ -17,7 +17,7 @@ describe('proofIsWellFormed', () => {
     const { proofIsWellFormed } = await import('@/lib/zk-review-proof')
     const result = {
       proof: null as unknown as object,
-      publicSignals: ['commitment', 'nullifier'],
+      publicSignals: ['commitment', 'nullifier', 'expiresAt', 'rating', 'reviewerId'],
       nullifier: 'abc123',
     }
     expect(proofIsWellFormed(result)).toBe(false)
@@ -91,7 +91,7 @@ describe('generateReviewProof', () => {
   it('throws an error when WASM circuit is not compiled', async () => {
     const { generateReviewProof } = await import('@/lib/zk-review-proof')
     await expect(
-      generateReviewProof({ credential: 'secret', subjectId: 'creator-1', rating: 5 }),
+      generateReviewProof({ credential: 'secret', subjectId: 'creator-1', rating: 5, reviewerId: 'user-1', expiresAt: 9999999999 }),
     ).rejects.toThrow(/WASM|proof generation/i)
   })
 })
@@ -160,7 +160,7 @@ describe('proof generation benchmark', () => {
     //
     //   const { generateReviewProof } = await import('@/lib/zk-review-proof')
     //   const start = performance.now()
-    //   await generateReviewProof({ credential: 'bench-credential', subjectId: 'bench-creator', rating: 4 })
+    //   await generateReviewProof({ credential: 'bench-credential', subjectId: 'bench-creator', rating: 4, reviewerId: 'bench-user', expiresAt: 9999999999 })
     //   const elapsed = performance.now() - start
     //   expect(elapsed).toBeLessThan(5000)
 

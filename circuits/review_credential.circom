@@ -24,7 +24,7 @@ template ReviewCredential() {
     signal input subjectId;
 
     // ── Private inputs ─────────────────────────────────────────────────────
-    signal private input credential;
+    signal input credential;
 
     // ── Public outputs ─────────────────────────────────────────────────────
     signal output commitment;
