@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # ── ZK Circuit Compilation ────────────────────────────────────────────────────
-# Compiles circuits/review_credential.circom → WASM + proving key.
+# Compiles circuits/review_credential_v2.circom → WASM + proving key.
 #
 # Prerequisites:
 #   npm install -g circom    # or build from https://github.com/iden3/circom
-#   pnpm install             # installs snarkjs
+#   pnpm install             # installs snarkjs and circomlib
+#   ln -sf ../node_modules/circomlib/circuits circuits/circomlib
 #
 # Usage:
 #   bash scripts/compile-zk.sh
@@ -21,8 +22,13 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CIRCUIT_DIR="$ROOT/circuits"
 BUILD_DIR="$ROOT/public/wasm"
 
-CIRCUIT="review_credential"
+CIRCUIT="review_credential_v2"
 PTAU="$ROOT/circuits/pot16_final.ptau"
+
+# Ensure the circomlib symlink exists for includes
+if [ ! -L "$CIRCUIT_DIR/circomlib" ]; then
+  ln -sf ../node_modules/circomlib/circuits "$CIRCUIT_DIR/circomlib"
+fi
 
 echo "==> Compiling $CIRCUIT.circom …"
 circom "$CIRCUIT_DIR/$CIRCUIT.circom" \

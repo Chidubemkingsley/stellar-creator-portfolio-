@@ -6,12 +6,15 @@ export interface ZkProofResult {
   proof: object
   publicSignals: string[]
   nullifier: string
+  expiresAt?: string
 }
 
 export interface ZkReviewInput {
   credential: string
   subjectId: string
   rating: number
+  reviewerId: string
+  expiresAt: number
 }
 
 interface VKey {
@@ -47,16 +50,28 @@ async function getVkey(): Promise<VKey> {
   return vkey
 }
 
+export function validateReviewInput(input: ZkReviewInput): void {
+  if (!input.credential) throw new Error('credential is required')
+  if (!input.subjectId) throw new Error('subjectId is required')
+  if (!input.reviewerId) throw new Error('reviewerId is required')
+  if (input.rating < 1 || input.rating > 5) throw new Error('rating must be between 1 and 5')
+  if (input.expiresAt < Math.floor(Date.now() / 1000)) throw new Error('credential has expired')
+}
+
 export async function generateReviewProof(
   input: ZkReviewInput,
   onStatusChange?: (status: ProofStatus) => void,
 ): Promise<ZkProofResult> {
+  validateReviewInput(input)
   onStatusChange?.('loading_wasm')
   setPaths()
 
   const witness = {
     credential: input.credential,
     subjectId: input.subjectId,
+    expiresAt: input.expiresAt.toString(),
+    rating: input.rating.toString(),
+    reviewerId: input.reviewerId,
   }
 
   onStatusChange?.('proving')
@@ -77,10 +92,11 @@ export async function generateReviewProof(
   }
 
   const nullifier = publicSignals[1]
+  const expiresAt = publicSignals[2]
 
   onStatusChange?.('verified')
 
-  return { proof, publicSignals, nullifier }
+  return { proof, publicSignals, nullifier, expiresAt }
 }
 
 export async function verifyProofLocally(result: ZkProofResult): Promise<boolean> {
@@ -104,7 +120,7 @@ export function proofIsWellFormed(result: ZkProofResult): boolean {
     typeof result.proof === 'object' &&
     result.proof !== null &&
     Array.isArray(result.publicSignals) &&
-    result.publicSignals.length >= 2 &&
+    result.publicSignals.length >= 5 &&
     typeof result.nullifier === 'string' &&
     result.nullifier.length > 0
   )
