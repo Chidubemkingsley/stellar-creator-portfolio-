@@ -40,10 +40,7 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    if (
-      (reviewerId && reviewerId !== userId) ||
-      (publicSignals.length >= 5 && publicSignals[4] !== userId)
-    ) {
+    if (reviewerId && reviewerId !== userId) {
       return NextResponse.json(
         { error: 'reviewerId mismatch', code: 'REVIEWER_MISMATCH' },
         { status: 403 },

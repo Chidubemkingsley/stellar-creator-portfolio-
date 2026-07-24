@@ -120,7 +120,7 @@ export function proofIsWellFormed(result: ZkProofResult): boolean {
     typeof result.proof === 'object' &&
     result.proof !== null &&
     Array.isArray(result.publicSignals) &&
-    result.publicSignals.length >= 2 &&
+    result.publicSignals.length >= 5 &&
     typeof result.nullifier === 'string' &&
     result.nullifier.length > 0
   )

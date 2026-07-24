@@ -23,7 +23,7 @@ describe('proofIsWellFormed', () => {
     expect(proofIsWellFormed(result)).toBe(false)
   })
 
-  it('returns false when publicSignals has fewer than 2 entries', async () => {
+  it('returns false when publicSignals has fewer than 5 entries', async () => {
     const { proofIsWellFormed } = await import('@/lib/zk-review-proof')
     const result = {
       proof: { pi_a: ['1'] },
@@ -37,7 +37,7 @@ describe('proofIsWellFormed', () => {
     const { proofIsWellFormed } = await import('@/lib/zk-review-proof')
     const result = {
       proof: { pi_a: ['1'] },
-      publicSignals: ['a', 'b'],
+      publicSignals: ['c', 'n', 'e', 'r', 'r'],
       nullifier: '',
     }
     expect(proofIsWellFormed(result)).toBe(false)
@@ -47,8 +47,18 @@ describe('proofIsWellFormed', () => {
     const { proofIsWellFormed } = await import('@/lib/zk-review-proof')
     const result = {
       proof: 'not-an-object' as unknown as object,
-      publicSignals: ['a', 'b'],
+      publicSignals: ['c', 'n', 'e', 'r', 'r'],
       nullifier: 'abc',
+    }
+    expect(proofIsWellFormed(result)).toBe(false)
+  })
+
+  it('returns false when publicSignals has only 2 (v1-length) entries', async () => {
+    const { proofIsWellFormed } = await import('@/lib/zk-review-proof')
+    const result = {
+      proof: { pi_a: ['1', '2'], pi_b: [['3', '4'], ['5', '6']], pi_c: ['7', '8'] },
+      publicSignals: ['commitment', 'nullifier'],
+      nullifier: 'abc123',
     }
     expect(proofIsWellFormed(result)).toBe(false)
   })
