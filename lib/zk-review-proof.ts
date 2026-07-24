@@ -50,10 +50,19 @@ async function getVkey(): Promise<VKey> {
   return vkey
 }
 
+export function validateReviewInput(input: ZkReviewInput): void {
+  if (!input.credential) throw new Error('credential is required')
+  if (!input.subjectId) throw new Error('subjectId is required')
+  if (!input.reviewerId) throw new Error('reviewerId is required')
+  if (input.rating < 1 || input.rating > 5) throw new Error('rating must be between 1 and 5')
+  if (input.expiresAt < Math.floor(Date.now() / 1000)) throw new Error('credential has expired')
+}
+
 export async function generateReviewProof(
   input: ZkReviewInput,
   onStatusChange?: (status: ProofStatus) => void,
 ): Promise<ZkProofResult> {
+  validateReviewInput(input)
   onStatusChange?.('loading_wasm')
   setPaths()
 
