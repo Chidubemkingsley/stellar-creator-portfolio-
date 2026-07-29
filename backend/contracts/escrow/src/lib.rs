@@ -395,8 +395,22 @@ impl EscrowContract {
             "Milestone already exists"
         );
 
+        // Cumulative invariant (#78): the sum of all milestone allocations must
+        // never exceed the escrowed amount. The per-milestone check above is not
+        // sufficient — two milestones can each satisfy `amount <= escrow.amount`
+        // while together exceeding it, which would let releases pay out more than
+        // was deposited.
+        let total_key = (Symbol::new(&env, "ms_total"), escrow_id);
+        let allocated: i128 = env.storage().persistent().get(&total_key).unwrap_or(0);
+        assert!(
+            allocated + amount <= escrow.amount,
+            "Total milestone allocation exceeds escrow amount"
+        );
+
         let milestone = Milestone { escrow_id, index, description, amount, released: false };
         env.storage().persistent().set(&m_key, &milestone);
+        // Atomically record the new running allocation total in the same call.
+        env.storage().persistent().set(&total_key, &(allocated + amount));
     }
 
     /// Release a single milestone payment to payee. Authorizer must be payer.
@@ -419,6 +433,17 @@ impl EscrowContract {
         // EFFECTS – mark released before the token transfer
         milestone.released = true;
         env.storage().persistent().set(&m_key, &milestone);
+
+        // Belt-and-suspenders invariant (#78): cumulative releases must never
+        // exceed the escrowed amount, independent of allocation bookkeeping.
+        let reld_key = (Symbol::new(&env, "ms_reld"), escrow_id);
+        let released_total: i128 =
+            env.storage().persistent().get(&reld_key).unwrap_or(0) + milestone.amount;
+        assert!(
+            released_total <= escrow.amount,
+            "Total milestone releases exceed escrow amount"
+        );
+        env.storage().persistent().set(&reld_key, &released_total);
 
         // INTERACTIONS – external call after state is finalised
         TokenClient::new(&env, &escrow.token)
@@ -1095,6 +1120,40 @@ mod tests {
         let contract = EscrowContractClient::new(&env, &env.register_contract(None, EscrowContract));
         let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
         contract.add_milestone(&payer, &id, &0, &Symbol::new(&env, "x"), &1001);
+    }
+
+    // ── cumulative milestone invariant (#78) ──────────────────────────────────
+
+    /// Two milestones can each individually pass `amount <= escrow.amount` while
+    /// together exceeding it. The running-total guard must reject the second.
+    #[test]
+    #[should_panic(expected = "Total milestone allocation exceeds escrow amount")]
+    fn cumulative_milestone_allocation_cannot_exceed_escrow() {
+        let env = Env::default();
+        let (_, token, payer, payee) = setup(&env, 1000);
+        let contract = EscrowContractClient::new(&env, &env.register_contract(None, EscrowContract));
+        // Gross 1000 -> 2.5% fee -> net escrow amount 975.
+        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
+        contract.add_milestone(&payer, &id, &0, &Symbol::new(&env, "p1"), &600); // 600 <= 975 ok
+        // 600 + 500 = 1100 > 975 — individually fine, cumulatively over-allocated.
+        contract.add_milestone(&payer, &id, &1, &Symbol::new(&env, "p2"), &500);
+    }
+
+    /// Milestones summing to exactly the net escrow amount remain valid and both
+    /// release, paying out exactly the deposit (no over-payout, no dust locked).
+    #[test]
+    fn milestones_summing_to_net_amount_are_allowed_and_release_fully() {
+        let env = Env::default();
+        let (_, token, payer, payee) = setup(&env, 1000);
+        let cid = env.register_contract(None, EscrowContract);
+        let contract = EscrowContractClient::new(&env, &cid);
+        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
+        // 600 + 375 == 975 (net), the exact boundary.
+        contract.add_milestone(&payer, &id, &0, &Symbol::new(&env, "p1"), &600);
+        contract.add_milestone(&payer, &id, &1, &Symbol::new(&env, "p2"), &375);
+        contract.release_milestone(&payer, &id, &0);
+        contract.release_milestone(&payer, &id, &1);
+        assert_eq!(TokenClient::new(&env, &token).balance(&payee), 975);
     }
 
     // ── balance conservation ──────────────────────────────────────────────────
