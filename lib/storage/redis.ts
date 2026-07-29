@@ -144,6 +144,74 @@ export async function redisIncr(key: string, ttlSeconds: number): Promise<number
 }
 
 /**
+ * Set a value only if the key does not already exist.
+ * Returns true when the write succeeds, false when the key already exists,
+ * and null when Redis is unavailable.
+ */
+export async function redisSetIfAbsent<T>(
+  key: string,
+  value: T,
+  ttlSeconds: number,
+): Promise<boolean | null> {
+  const redis = getClient()
+  if (!redis) return null
+
+  try {
+    const result = await redis.set(key, JSON.stringify(value), 'NX', 'EX', ttlSeconds)
+    return result === 'OK'
+  } catch {
+    return null
+  }
+}
+
+export type SlidingWindowRateLimitResult = {
+  allowed: boolean
+  count: number
+  remaining: number
+  resetAt: number
+}
+
+/**
+ * Sliding-window rate limiting backed by a Redis sorted set.
+ * Returns null when Redis is unavailable so callers can degrade gracefully.
+ */
+export async function redisSlidingWindowRateLimit(
+  key: string,
+  maxRequests: number,
+  windowSeconds: number,
+): Promise<SlidingWindowRateLimitResult | null> {
+  const redis = getClient()
+  if (!redis) return null
+
+  const now = Date.now()
+  const cutoff = now - windowSeconds * 1000
+  const member = `${now}:${Math.random().toString(36).slice(2)}`
+
+  try {
+    const multi = redis.multi()
+    multi.zremrangebyscore(key, 0, cutoff)
+    multi.zadd(key, now, member)
+    multi.zcard(key)
+    multi.expire(key, windowSeconds)
+
+    const results = await multi.exec()
+    const count = results?.[2]?.[1]
+    if (typeof count !== 'number') {
+      return null
+    }
+
+    return {
+      allowed: count <= maxRequests,
+      count,
+      remaining: Math.max(maxRequests - count, 0),
+      resetAt: now + windowSeconds * 1000,
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
  * Get the TTL remaining on a key (seconds). Returns null if unavailable.
  */
 export async function redisTTL(key: string): Promise<number | null> {
