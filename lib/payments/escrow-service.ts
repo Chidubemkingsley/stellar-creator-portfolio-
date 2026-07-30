@@ -44,10 +44,32 @@ export interface EscrowRecord {
   status: EscrowStatus;
   receiptUrl?: string | null;
   failureMessage?: string | null;
+  usdAmountCents?: number | null;
+  lockedPriceMicroUsd?: number | null;
+  usedFallbackPrice?: boolean | null;
+  settlementTxHashes?: string[];
+  settlementRecoveryNote?: string | null;
   version: number;
   createdAt: string;
   updatedAt: string;
 }
+
+export interface FiatSettlementResult {
+  lockedPriceMicroUsd: number;
+  usedFallbackPrice: boolean;
+  xlmAmount: number;
+  txHashes: string[];
+  rollbackRequired?: boolean;
+  manualRecoveryNote?: string;
+}
+
+export type FiatSettlementExecutor = (params: {
+  escrowId: string;
+  bountyId: string;
+  clientUserId: string;
+  usdAmountCents: number;
+  minXlmOut?: number;
+}) => Promise<FiatSettlementResult>;
 
 function toRecord(row: Escrow): EscrowRecord {
   return {
@@ -62,6 +84,11 @@ function toRecord(row: Escrow): EscrowRecord {
     status: row.status as EscrowStatus,
     receiptUrl: row.receiptUrl,
     failureMessage: row.failureMessage,
+    usdAmountCents: row.usdAmountCents,
+    lockedPriceMicroUsd: row.lockedPriceMicroUsd,
+    usedFallbackPrice: row.usedFallbackPrice,
+    settlementTxHashes: row.settlementTxHashes ?? [],
+    settlementRecoveryNote: row.settlementRecoveryNote,
     version: row.version,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -88,10 +115,14 @@ export async function createEscrow(params: {
   bountyId: string;
   clientUserId: string;
   amountCents: number;
+  usdAmountCents?: number;
   currency?: string;
   feeBps?: number;
+  minXlmOut?: number;
+  fiatSettlementExecutor?: FiatSettlementExecutor;
 }): Promise<EscrowRecord> {
   const currency = (params.currency ?? "usd").toLowerCase();
+  const usdAmountCents = params.usdAmountCents ?? params.amountCents;
   const platformFeeCents = computePlatformFeeCents(
     params.amountCents,
     params.feeBps ?? 1000,
@@ -112,11 +143,47 @@ export async function createEscrow(params: {
       amount: params.amountCents,
       currency,
       platformFeeCents,
+      usdAmountCents,
       status: "pending_funding",
     },
   });
 
-  return toRecord(row);
+  if (!params.fiatSettlementExecutor) {
+    return toRecord(row);
+  }
+
+  try {
+    const settlement = await params.fiatSettlementExecutor({
+      escrowId: row.id,
+      bountyId: params.bountyId,
+      clientUserId: params.clientUserId,
+      usdAmountCents,
+      minXlmOut: params.minXlmOut,
+    });
+
+    const settled = await prisma.escrow.update({
+      where: { id: row.id },
+      data: {
+        lockedPriceMicroUsd: settlement.lockedPriceMicroUsd,
+        usedFallbackPrice: settlement.usedFallbackPrice,
+        settlementTxHashes: settlement.txHashes,
+        settlementRecoveryNote:
+          settlement.manualRecoveryNote ??
+          (settlement.rollbackRequired
+            ? "AMM swap succeeded but escrow deposit did not. Run the admin refund transaction to recover XLM from the escrow contract address."
+            : undefined),
+        version: { increment: 1 },
+      },
+    });
+
+    return toRecord(settled);
+  } catch (error) {
+    await markFailed(
+      row.id,
+      error instanceof Error ? error.message : "Fiat settlement failed",
+    );
+    throw error;
+  }
 }
 
 export async function getEscrow(

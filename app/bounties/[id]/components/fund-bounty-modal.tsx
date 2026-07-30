@@ -25,6 +25,14 @@ export function FundBountyModal({
   onClose,
 }: FundBountyModalProps) {
   const [amount, setAmount] = useState(String(budget));
+  const parsedAmount = Number(amount);
+  const oracleQuote = {
+    priceMicroUsd: 120_000,
+    sources: 0,
+  };
+  const xlmPreview = parsedAmount > 0
+    ? (parsedAmount * 1_000_000) / oracleQuote.priceMicroUsd
+    : 0;
   const [walletAddress, setWalletAddress] = useState('');
   const [payeeAddress, setPayeeAddress] = useState('');
   const [tokenAddress, setTokenAddress] = useState('USDC_TOKEN_ADDRESS');
@@ -35,7 +43,6 @@ export function FundBountyModal({
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
 
-    const parsedAmount = Number(amount);
     if (!parsedAmount || parsedAmount <= 0) {
       setError('Amount must be a positive number');
       return;
@@ -53,6 +60,8 @@ export function FundBountyModal({
       bountyId,
       operation: 'deposit' as const,
       amount: parsedAmount,
+      usdAmountCents: Math.round(parsedAmount * 100),
+      minXlmOut: Math.floor(xlmPreview * 0.95),
       payerAddress: walletAddress.trim(),
       payeeAddress: payeeAddress.trim(),
       tokenAddress: tokenAddress.trim(),
@@ -150,6 +159,20 @@ export function FundBountyModal({
                   className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
                   required
                 />
+              </div>
+
+              <div className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-muted-foreground">USD to XLM preview</span>
+                  <span className="font-medium text-foreground">
+                    {Number.isFinite(xlmPreview) ? xlmPreview.toFixed(2) : '0.00'} XLM
+                  </span>
+                </div>
+                {oracleQuote.sources === 0 && (
+                  <p className="mt-1 text-xs text-amber-600">
+                    Slippage warning: oracle fallback price is active.
+                  </p>
+                )}
               </div>
 
               {/* Payer wallet */}
