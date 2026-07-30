@@ -66,6 +66,8 @@ enum DataKey {
     OracleAddress,
     /// Last accepted price snapshot.
     LastPrice,
+    /// Price valuation locked for a specific escrow at deposit time.
+    LockedValuation(u64),
 }
 
 // ---------------------------------------------------------------------------
@@ -166,6 +168,52 @@ impl OracleContract {
             price_used: price_data.price_micro_usd,
             used_fallback,
         }
+    }
+
+    /// Snapshot the current USD/token valuation for an escrow.
+    ///
+    /// Settlement must use this locked valuation instead of whatever spot price
+    /// the oracle reports later.
+    pub fn lock_price(env: Env, escrow_id: u64, usd_amount_micro: i128) -> ValuationResult {
+        assert!(escrow_id > 0, "Escrow id must be positive");
+
+        let key = DataKey::LockedValuation(escrow_id);
+        if let Some(existing) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, ValuationResult>(&key)
+        {
+            assert_eq!(
+                existing.usd_amount_micro,
+                usd_amount_micro,
+                "Locked valuation amount mismatch"
+            );
+            return existing;
+        }
+
+        let valuation = Self::value_in_tokens(env.clone(), usd_amount_micro);
+        env.storage().persistent().set(&key, &valuation);
+
+        env.events().publish(
+            (Symbol::new(&env, "oracle"), Symbol::new(&env, "price_locked")),
+            (
+                escrow_id,
+                valuation.usd_amount_micro,
+                valuation.token_amount,
+                valuation.price_used,
+                valuation.used_fallback,
+            ),
+        );
+
+        valuation
+    }
+
+    /// Return the valuation locked for an escrow at deposit time.
+    pub fn get_locked_valuation(env: Env, escrow_id: u64) -> ValuationResult {
+        env.storage()
+            .persistent()
+            .get::<DataKey, ValuationResult>(&DataKey::LockedValuation(escrow_id))
+            .expect("Locked valuation not found")
     }
 }
 

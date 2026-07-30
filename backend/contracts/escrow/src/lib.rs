@@ -5,7 +5,7 @@ mod reentrancy;
 use reentrancy::{require_active_escrow, require_authorized_party, ReentrancyGuard};
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, Env, Symbol,
+    contract, contractimpl, contracttype, symbol_short, Address, Env, IntoVal, Symbol, Val, Vec,
     token::Client as TokenClient,
 };
 
@@ -56,6 +56,17 @@ pub struct EscrowAccount {
     pub created_at: u64,
     pub released_at: Option<u64>,
     pub fee_collected: i128,
+    pub usd_amount_micro: Option<i128>,
+    pub oracle_contract: Option<Address>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ValuationResult {
+    pub usd_amount_micro: i128,
+    pub token_amount: i128,
+    pub price_used: i128,
+    pub used_fallback: bool,
 }
 
 /// Milestone â€” a named portion of the total escrow amount
@@ -119,6 +130,8 @@ impl EscrowContract {
         amount: i128,
         token: Address,
         release_condition: ReleaseCondition,
+        oracle_contract: Option<Address>,
+        usd_amount_micro: Option<i128>,
     ) -> u64 {
         payer.require_auth();
         assert!(amount > 0, "Amount must be positive");
@@ -133,6 +146,23 @@ impl EscrowContract {
         let counter_key = Symbol::new(&env, "escrow_counter");
         let mut counter: u64 = env.storage().persistent().get::<Symbol, u64>(&counter_key).unwrap_or(0);
         counter += 1;
+
+        match (oracle_contract.clone(), usd_amount_micro) {
+            (Some(oracle), Some(usd_amount)) => {
+                assert!(usd_amount > 0, "USD amount must be positive");
+                let args: Vec<Val> = Vec::from_array(
+                    &env,
+                    [counter.into_val(&env), usd_amount.into_val(&env)],
+                );
+                let _: ValuationResult = env.invoke_contract(
+                    &oracle,
+                    &Symbol::new(&env, "lock_price"),
+                    args,
+                );
+            }
+            (None, None) => {}
+            _ => panic!("oracle and usd amount must be provided together"),
+        }
 
         let fee = platform_fee(amount);
         let net_amount = amount - fee;
@@ -158,6 +188,8 @@ impl EscrowContract {
             created_at: env.ledger().timestamp(),
             released_at: None,
             fee_collected: fee,
+            usd_amount_micro,
+            oracle_contract,
         };
 
         env.storage()
@@ -217,8 +249,21 @@ impl EscrowContract {
             "Release condition not met"
         );
 
-        TokenClient::new(&env, &escrow.token)
-            .transfer(&env.current_contract_address(), &escrow.payee, &escrow.amount);
+        if let (Some(oracle), Some(_usd_amount)) = (
+            escrow.oracle_contract.clone(),
+            escrow.usd_amount_micro,
+        ) {
+            let args: Vec<Val> = Vec::from_array(&env, [escrow_id.into_val(&env)]);
+            let valuation: ValuationResult = env.invoke_contract(
+                &oracle,
+                &Symbol::new(&env, "get_locked_valuation"),
+                args,
+            );
+            assert!(
+                escrow.amount >= valuation.token_amount * 95 / 100,
+                "Escrow below locked valuation tolerance"
+            );
+        }
 
         escrow.status = EscrowStatus::Released;
         escrow.released_at = Some(env.ledger().timestamp());
@@ -254,9 +299,6 @@ impl EscrowContract {
         require_active_escrow(escrow.status == EscrowStatus::Active);
         assert_eq!(authorizer, escrow.payer, "Only payer can refund");
         assert!(escrow.status == EscrowStatus::Active, "Escrow not active");
-
-        TokenClient::new(&env, &escrow.token)
-            .transfer(&env.current_contract_address(), &escrow.payer, &escrow.amount);
 
         // EFFECTS – mutate state before any cross-contract call
         escrow.status = EscrowStatus::Refunded;
@@ -752,7 +794,7 @@ mod tests {
         let (_, token, payer, payee) = setup(&env, 1000);
         let cid = env.register_contract(None, EscrowContract);
         let contract = EscrowContractClient::new(&env, &cid);
-        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
+        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
         let escrow = contract.get_escrow(&id);
         assert_eq!(escrow.amount, 975);
         assert_eq!(escrow.fee_collected, 25);
@@ -774,7 +816,7 @@ mod tests {
         let (_, token, payer, payee) = setup(&env, 1000);
         let contract = EscrowContractClient::new(&env, &env.register_contract(None, EscrowContract));
 
-        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
+        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
         assert_eq!(id, 1);
         let e = contract.get_escrow(&id);
         assert_eq!(e.bounty_id, 1);
@@ -790,7 +832,7 @@ mod tests {
         let env = Env::default();
         let (_, token, payer, payee) = setup(&env, 0);
         let contract = EscrowContractClient::new(&env, &env.register_contract(None, EscrowContract));
-        contract.deposit(&1u64, &payer, &payee, &0, &token, &ReleaseCondition::OnCompletion);
+        contract.deposit(&1u64, &payer, &payee, &0, &token, &ReleaseCondition::OnCompletion, &None, &None);
     }
 
     // â”€â”€ release â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -802,7 +844,7 @@ mod tests {
         let cid = env.register_contract(None, EscrowContract);
         let contract = EscrowContractClient::new(&env, &cid);
 
-        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
+        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
         assert_eq!(TokenClient::new(&env, &token).balance(&cid), 1000);
 
         contract.release_funds(&payee, &id);
@@ -820,7 +862,7 @@ mod tests {
         let env = Env::default();
         let (_, token, payer, payee) = setup(&env, 1000);
         let contract = EscrowContractClient::new(&env, &env.register_contract(None, EscrowContract));
-        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
+        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
         contract.release_funds(&payer, &id);
         contract.release_funds(&payer, &id);
     }
@@ -831,7 +873,7 @@ mod tests {
         let env = Env::default();
         let (_, token, payer, payee) = setup(&env, 1000);
         let contract = EscrowContractClient::new(&env, &env.register_contract(None, EscrowContract));
-        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
+        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
         contract.release_funds(&Address::generate(&env), &id);
     }
 
@@ -844,7 +886,7 @@ mod tests {
         let cid = env.register_contract(None, EscrowContract);
         let contract = EscrowContractClient::new(&env, &cid);
 
-        let id = contract.deposit(&1u64, &payer, &payee, &800, &token, &ReleaseCondition::OnCompletion);
+        let id = contract.deposit(&1u64, &payer, &payee, &800, &token, &ReleaseCondition::OnCompletion, &None, &None);
         contract.refund_escrow(&payer, &id);
 
         assert_eq!(TokenClient::new(&env, &token).balance(&payer), 780);
@@ -859,7 +901,7 @@ mod tests {
         let env = Env::default();
         let (_, token, payer, payee) = setup(&env, 1000);
         let contract = EscrowContractClient::new(&env, &env.register_contract(None, EscrowContract));
-        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
+        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
         contract.refund_escrow(&payee, &id);
     }
 
@@ -869,7 +911,7 @@ mod tests {
         let env = Env::default();
         let (_, token, payer, payee) = setup(&env, 1000);
         let contract = EscrowContractClient::new(&env, &env.register_contract(None, EscrowContract));
-        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
+        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
         contract.refund_escrow(&payer, &id);
         contract.refund_escrow(&payer, &id);
     }
@@ -880,7 +922,7 @@ mod tests {
         let env = Env::default();
         let (_, token, payer, payee) = setup(&env, 1000);
         let contract = EscrowContractClient::new(&env, &env.register_contract(None, EscrowContract));
-        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
+        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
         contract.release_funds(&payee, &id);
         contract.refund_escrow(&payer, &id);
     }
@@ -891,7 +933,7 @@ mod tests {
         let env = Env::default();
         let (_, token, payer, payee) = setup(&env, 1000);
         let contract = EscrowContractClient::new(&env, &env.register_contract(None, EscrowContract));
-        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
+        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
         contract.refund_escrow(&payer, &id);
         contract.release_funds(&payee, &id);
     }
@@ -903,7 +945,7 @@ mod tests {
         let env = Env::default();
         let (_, token, payer, payee) = setup(&env, 1000);
         let contract = EscrowContractClient::new(&env, &env.register_contract(None, EscrowContract));
-        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
+        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
         contract.dispute_escrow(&payer, &id);
         assert!(contract.get_escrow(&id).status == EscrowStatus::Disputed);
     }
@@ -913,7 +955,7 @@ mod tests {
         let env = Env::default();
         let (_, token, payer, payee) = setup(&env, 1000);
         let contract = EscrowContractClient::new(&env, &env.register_contract(None, EscrowContract));
-        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
+        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
         contract.dispute_escrow(&payee, &id);
         assert!(contract.get_escrow(&id).status == EscrowStatus::Disputed);
     }
@@ -924,7 +966,7 @@ mod tests {
         let env = Env::default();
         let (_, token, payer, payee) = setup(&env, 1000);
         let contract = EscrowContractClient::new(&env, &env.register_contract(None, EscrowContract));
-        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
+        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
         contract.dispute_escrow(&Address::generate(&env), &id);
     }
 
@@ -934,7 +976,7 @@ mod tests {
         let env = Env::default();
         let (_, token, payer, payee) = setup(&env, 1000);
         let contract = EscrowContractClient::new(&env, &env.register_contract(None, EscrowContract));
-        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
+        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
         contract.release_funds(&payer, &id);
         contract.dispute_escrow(&payer, &id);
     }
@@ -945,7 +987,7 @@ mod tests {
         let env = Env::default();
         let (_, token, payer, payee) = setup(&env, 1000);
         let contract = EscrowContractClient::new(&env, &env.register_contract(None, EscrowContract));
-        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
+        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
         contract.dispute_escrow(&payer, &id);
         contract.release_funds(&payee, &id);
     }
@@ -963,7 +1005,7 @@ mod tests {
         let admin = Address::generate(&env);
         contract.set_admin(&admin);
 
-        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
+        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
         contract.dispute_escrow(&payer, &id);
         contract.resolve_dispute(&admin, &id, &true);
 
@@ -983,7 +1025,7 @@ mod tests {
         let admin = Address::generate(&env);
         contract.set_admin(&admin);
 
-        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
+        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
         contract.dispute_escrow(&payee, &id);
         contract.resolve_dispute(&admin, &id, &false);
 
@@ -1002,7 +1044,7 @@ mod tests {
         let admin = Address::generate(&env);
         contract.set_admin(&admin);
 
-        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
+        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
         contract.dispute_escrow(&payer, &id);
         contract.resolve_dispute(&payer, &id, &true); // payer is not admin
     }
@@ -1017,7 +1059,7 @@ mod tests {
         let admin = Address::generate(&env);
         contract.set_admin(&admin);
 
-        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
+        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
         contract.resolve_dispute(&admin, &id, &true); // not disputed yet
     }
 
@@ -1043,7 +1085,7 @@ mod tests {
         let (_, token, payer, payee) = setup(&env, 500);
         let contract = EscrowContractClient::new(&env, &env.register_contract(None, EscrowContract));
         env.ledger().set_timestamp(100);
-        let id = contract.deposit(&1u64, &payer, &payee, &500, &token, &ReleaseCondition::Timelock(200));
+        let id = contract.deposit(&1u64, &payer, &payee, &500, &token, &ReleaseCondition::Timelock(200), &None, &None);
         contract.release_funds(&payer, &id);
     }
 
@@ -1054,7 +1096,7 @@ mod tests {
         let cid = env.register_contract(None, EscrowContract);
         let contract = EscrowContractClient::new(&env, &cid);
         env.ledger().set_timestamp(100);
-        let id = contract.deposit(&1u64, &payer, &payee, &500, &token, &ReleaseCondition::Timelock(200));
+        let id = contract.deposit(&1u64, &payer, &payee, &500, &token, &ReleaseCondition::Timelock(200), &None, &None);
         env.ledger().set_timestamp(250);
         contract.release_funds(&payee, &id);
         assert!(contract.get_escrow(&id).status == EscrowStatus::Released);
@@ -1069,7 +1111,7 @@ mod tests {
         let cid = env.register_contract(None, EscrowContract);
         let contract = EscrowContractClient::new(&env, &cid);
 
-        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
+        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
         let desc = Symbol::new(&env, "phase1");
         contract.add_milestone(&payer, &id, &0, &desc, &400);
         contract.release_milestone(&payer, &id, &0);
@@ -1084,7 +1126,7 @@ mod tests {
         let env = Env::default();
         let (_, token, payer, payee) = setup(&env, 1000);
         let contract = EscrowContractClient::new(&env, &env.register_contract(None, EscrowContract));
-        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
+        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
         let desc = Symbol::new(&env, "phase1");
         contract.add_milestone(&payer, &id, &0, &desc, &400);
         contract.release_milestone(&payer, &id, &0);
@@ -1097,7 +1139,7 @@ mod tests {
         let env = Env::default();
         let (_, token, payer, payee) = setup(&env, 1000);
         let contract = EscrowContractClient::new(&env, &env.register_contract(None, EscrowContract));
-        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
+        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
         contract.add_milestone(&payee, &id, &0, &Symbol::new(&env, "x"), &400);
     }
 
@@ -1107,7 +1149,7 @@ mod tests {
         let env = Env::default();
         let (_, token, payer, payee) = setup(&env, 1000);
         let contract = EscrowContractClient::new(&env, &env.register_contract(None, EscrowContract));
-        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
+        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
         contract.add_milestone(&payer, &id, &0, &Symbol::new(&env, "x"), &400);
         contract.release_milestone(&payee, &id, &0);
     }
@@ -1118,7 +1160,7 @@ mod tests {
         let env = Env::default();
         let (_, token, payer, payee) = setup(&env, 1000);
         let contract = EscrowContractClient::new(&env, &env.register_contract(None, EscrowContract));
-        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
+        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
         contract.add_milestone(&payer, &id, &0, &Symbol::new(&env, "x"), &1001);
     }
 
@@ -1133,7 +1175,7 @@ mod tests {
         let (_, token, payer, payee) = setup(&env, 1000);
         let contract = EscrowContractClient::new(&env, &env.register_contract(None, EscrowContract));
         // Gross 1000 -> 2.5% fee -> net escrow amount 975.
-        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
+        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
         contract.add_milestone(&payer, &id, &0, &Symbol::new(&env, "p1"), &600); // 600 <= 975 ok
         // 600 + 500 = 1100 > 975 — individually fine, cumulatively over-allocated.
         contract.add_milestone(&payer, &id, &1, &Symbol::new(&env, "p2"), &500);
@@ -1147,7 +1189,7 @@ mod tests {
         let (_, token, payer, payee) = setup(&env, 1000);
         let cid = env.register_contract(None, EscrowContract);
         let contract = EscrowContractClient::new(&env, &cid);
-        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
+        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
         // 600 + 375 == 975 (net), the exact boundary.
         contract.add_milestone(&payer, &id, &0, &Symbol::new(&env, "p1"), &600);
         contract.add_milestone(&payer, &id, &1, &Symbol::new(&env, "p2"), &375);
@@ -1167,7 +1209,7 @@ mod tests {
         let contract = EscrowContractClient::new(&env, &cid);
         let tc = TokenClient::new(&env, &token);
 
-        let id = contract.deposit(&1u64, &payer, &payee, &2500, &token, &ReleaseCondition::OnCompletion);
+        let id = contract.deposit(&1u64, &payer, &payee, &2500, &token, &ReleaseCondition::OnCompletion, &None, &None);
         assert_eq!(tc.balance(&cid), 2500);
         assert_eq!(tc.balance(&payer), 0);
 
@@ -1186,7 +1228,7 @@ mod tests {
         let contract = EscrowContractClient::new(&env, &cid);
         let tc = TokenClient::new(&env, &token);
 
-        let id = contract.deposit(&1u64, &payer, &payee, &1800, &token, &ReleaseCondition::OnCompletion);
+        let id = contract.deposit(&1u64, &payer, &payee, &1800, &token, &ReleaseCondition::OnCompletion, &None, &None);
         contract.refund_escrow(&payer, &id);
 
         assert_eq!(tc.balance(&payer), 1755);
@@ -1206,8 +1248,8 @@ mod tests {
         let tc = TokenClient::new(&env, &token);
 
         // Deposit two separate escrows from the same payer
-        let id_a = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
-        let id_b = contract.deposit(&2u64, &payer, &payee, &2000, &token, &ReleaseCondition::OnCompletion);
+        let id_a = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
+        let id_b = contract.deposit(&2u64, &payer, &payee, &2000, &token, &ReleaseCondition::OnCompletion, &None, &None);
         assert_eq!(tc.balance(&cid), 3000);
 
         contract.release_funds(&payer, &id_a);
@@ -1227,7 +1269,7 @@ mod tests {
         let contract = EscrowContractClient::new(&env, &env.register_contract(None, EscrowContract));
 
         let b_id = 99u64;
-        let e_id = contract.deposit(&b_id, &payer, &payee, &500, &token, &ReleaseCondition::OnCompletion);
+        let e_id = contract.deposit(&b_id, &payer, &payee, &500, &token, &ReleaseCondition::OnCompletion, &None, &None);
         
         assert_eq!(contract.get_escrow_id_for_bounty(&b_id), e_id);
         assert_eq!(contract.get_escrow_id_for_bounty(&100u64), 0);
@@ -1240,9 +1282,9 @@ mod tests {
         let (_, token, payer, payee) = setup(&env, 3000);
         let contract = EscrowContractClient::new(&env, &env.register_contract(None, EscrowContract));
 
-        let id1 = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
-        let id2 = contract.deposit(&2u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
-        let id3 = contract.deposit(&3u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
+        let id1 = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
+        let id2 = contract.deposit(&2u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
+        let id3 = contract.deposit(&3u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
 
         assert_eq!(id1, 1);
         assert_eq!(id2, 2);
@@ -1260,7 +1302,7 @@ mod tests {
         let contract_id = env.register_contract(None, EscrowContract);
         let contract = EscrowContractClient::new(&env, &contract_id);
 
-        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
+        let id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
         contract.dispute_escrow(&payer, &id);
 
         // Balance unchanged — funds are locked
@@ -1279,7 +1321,7 @@ mod tests {
         let contract = EscrowContractClient::new(&env, &contract_id);
         let token_client = TokenClient::new(&env, &token);
 
-        let escrow_id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
+        let escrow_id = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
         contract.add_milestone(&payer, &escrow_id, &0, &Symbol::new(&env, "p1"), &600);
         contract.add_milestone(&payer, &escrow_id, &1, &Symbol::new(&env, "p2"), &375);
 
@@ -1297,8 +1339,8 @@ mod tests {
         let (_, token, payer, payee) = setup(&env, 2000);
         let contract = EscrowContractClient::new(&env, &env.register_contract(None, EscrowContract));
 
-        let id_a = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
-        let id_b = contract.deposit(&2u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion);
+        let id_a = contract.deposit(&1u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
+        let id_b = contract.deposit(&2u64, &payer, &payee, &1000, &token, &ReleaseCondition::OnCompletion, &None, &None);
 
         contract.add_milestone(&payer, &id_a, &0, &Symbol::new(&env, "m"), &500);
 
@@ -1313,7 +1355,7 @@ mod tests {
         let env = Env::default();
         let (_, token, payer, payee) = setup(&env, 1000);
         let contract = EscrowContractClient::new(&env, &env.register_contract(None, EscrowContract));
-        contract.deposit(&1u64, &payer, &payee, &-1, &token, &ReleaseCondition::OnCompletion);
+        contract.deposit(&1u64, &payer, &payee, &-1, &token, &ReleaseCondition::OnCompletion, &None, &None);
     }
 
     // â”€â”€ timelock boundary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1327,7 +1369,7 @@ mod tests {
         let contract = EscrowContractClient::new(&env, &cid);
 
         env.ledger().set_timestamp(100);
-        let id = contract.deposit(&1u64, &payer, &payee, &500, &token, &ReleaseCondition::Timelock(200));
+        let id = contract.deposit(&1u64, &payer, &payee, &500, &token, &ReleaseCondition::Timelock(200), &None, &None);
 
         // Set timestamp to exactly the deadline
         env.ledger().set_timestamp(200);
@@ -1346,7 +1388,7 @@ mod tests {
         let contract = EscrowContractClient::new(&env, &env.register_contract(None, EscrowContract));
 
         env.ledger().set_timestamp(100);
-        let id = contract.deposit(&1u64, &payer, &payee, &500, &token, &ReleaseCondition::Timelock(200));
+        let id = contract.deposit(&1u64, &payer, &payee, &500, &token, &ReleaseCondition::Timelock(200), &None, &None);
 
         env.ledger().set_timestamp(199);
         contract.release_funds(&payer, &id);

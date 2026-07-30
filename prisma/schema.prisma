@@ -154,6 +154,7 @@ model Bounty {
   category    String?
   tags        String[]
   applications BountyApplication[]
+  escrows      Escrow[]
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -355,9 +356,21 @@ model MatchNotification {
 
 model Escrow {
   id              String   @id @default(cuid())
+  bountyId        String?
   creatorId       String
   clientId        String
   amount          Int
+  currency        String   @default("usd")
+  platformFeeCents Int     @default(0)
+  paymentIntentId String?  @unique
+  receiptUrl      String?
+  failureMessage  String?
+  freelancerUserId String?
+  usdAmountCents  Int?
+  lockedPriceMicroUsd Int?
+  usedFallbackPrice Boolean?
+  settlementTxHashes String[] @default([])
+  settlementRecoveryNote String? @db.Text
   status          String   @default("active")
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
@@ -367,8 +380,12 @@ model Escrow {
   disputeReason   String?
   version         Int      @default(1)
 
+  bounty          Bounty?  @relation(fields: [bountyId], references: [id], onDelete: Cascade)
+
+  @@index([bountyId])
   @@index([creatorId])
   @@index([clientId])
+  @@index([paymentIntentId])
   @@index([status])
   @@index([createdAt])
   @@index([creatorId, status])
