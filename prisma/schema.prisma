@@ -70,13 +70,12 @@ model User {
   matchFeedback       MatchFeedback[]
   matchNotifications  MatchNotification[]
   auditLogs           AuditLog[]
-  creatorDisputes     Dispute[]           @relation("CreatorDisputes")
-  clientDisputes      Dispute[]           @relation("ClientDisputes")
-  filedDisputes       Dispute[]           @relation("FiledDisputes")
-  adminDisputes       Dispute[]           @relation("AdminDisputes")
+  adminDisputes       Dispute[]        @relation("AdminDisputes")
+  filedDisputes       Dispute[]        @relation("FiledDisputes")
+  creatorDisputes     Dispute[]        @relation("CreatorDisputes")
+  clientDisputes      Dispute[]        @relation("ClientDisputes")
   disputeEvidence     DisputeEvidence[]
-  disputeCommunityVotes DisputeCommunityVote[]
-
+  disputeVotes        DisputeCommunityVote[]
 
   @@index([email])
 }
@@ -155,6 +154,7 @@ model Bounty {
   category    String?
   tags        String[]
   applications BountyApplication[]
+  escrows      Escrow[]
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -208,12 +208,16 @@ model Review {
   helpfulCount      Int          @default(0)
   notHelpfulCount   Int          @default(0)
   status            ReviewStatus @default(PENDING)
+  nullifier         String?      @unique
+  zkProof           Json?        /// Groth16 proof JSON
+  zkPublicSignals   String[]     /// Public signals from proof
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
 
   @@index([creatorId])
   @@index([reviewerId])
   @@index([status])
+  @@index([nullifier])
 }
 
 model ReviewVote {
@@ -352,31 +356,45 @@ model MatchNotification {
 
 model Escrow {
   id              String   @id @default(cuid())
+  bountyId        String?
   creatorId       String
   clientId        String
   amount          Int
+  currency        String   @default("usd")
+  platformFeeCents Int     @default(0)
+  paymentIntentId String?  @unique
+  receiptUrl      String?
+  failureMessage  String?
+  freelancerUserId String?
+  usdAmountCents  Int?
+  lockedPriceMicroUsd Int?
+  usedFallbackPrice Boolean?
+  settlementTxHashes String[] @default([])
+  settlementRecoveryNote String? @db.Text
   status          String   @default("active")
-  paymentIntentId String?  // Stripe PaymentIntent id (manual capture)
-  stripeBlocked   Boolean  @default(false)
-  onChainEscrowId String?  // Soroban escrow id
-  onChainTxHash   String?
-  evidenceHash    String?
-  appealDeadline  DateTime?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
   releasedAt      DateTime?
   refundedAt      DateTime?
   disputedAt      DateTime?
   disputeReason   String?
+  stripeBlocked   Boolean  @default(false)
+  onChainEscrowId String?
+  onChainTxHash   String?
+  evidenceHash    String?
+  appealDeadline  DateTime?
   version         Int      @default(1)
 
+  bounty          Bounty?  @relation(fields: [bountyId], references: [id], onDelete: Cascade)
+
+  @@index([bountyId])
   @@index([creatorId])
   @@index([clientId])
+  @@index([paymentIntentId])
   @@index([status])
   @@index([createdAt])
   @@index([creatorId, status])
   @@index([clientId, status])
-  @@index([paymentIntentId])
 }
 
 model Balance {
@@ -594,6 +612,32 @@ enum AuditStatus {
   DENIED
 }
 
+// ── Messaging ────────────────────────────────────────────────────────────
+
+/// Archived messages — moved from Redis after TTL expiry via background job.
+model Message {
+  id            String   @id
+  threadId      String
+  senderId      String
+  recipientId   String
+  ciphertext    String
+  iv            String
+  createdAt     DateTime
+  attachment    Json?    /// { name, type, size, data (base64) }
+  status        String   @default("sent")   /// sent | delivered | read
+  readBy        String[] @default([])
+  metadata      Json?
+
+  /// Cursor for archive chronological ordering
+  archivedAt    DateTime @default(now())
+  expiresAt     DateTime /// when the Redis copy expired
+
+  @@index([threadId, createdAt])
+  @@index([senderId])
+  @@index([recipientId])
+  @@index([expiresAt])
+}
+
 // ── Soroban Sequence Management ──────────────────────────────────────────
 
 model SequenceLock {
@@ -652,3 +696,23 @@ model SorobanTransaction {
   @@index([status])
   @@unique([accountId, sequence])
 }
+
+// ── Centralized Error Reporting ────────────────────────────────────────────
+model ErrorLog {
+  id          String   @id
+  timestamp   DateTime
+  level       String
+  message     String
+  stack       String?
+  context     Json
+  url          String?
+  userAgent   String?
+  environment String
+
+  createdAt   DateTime @default(now())
+
+  @@index([timestamp])
+  @@index([level])
+  @@index([environment])
+}
+

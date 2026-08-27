@@ -15,16 +15,12 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import {
-  fileDispute,
   disputeFormInputSchema,
   toFileDisputeInput,
-  addEvidence,
   hashEvidenceBytes,
-  isOnChainFrozen,
-  isStripeCaptureBlocked,
-  type DisputeRecord,
   type DisputeFormInput,
 } from '@/lib/services/dispute-service';
+import { trpc } from '@/lib/trpc-client';
 import { Loader2, Shield, Lock } from 'lucide-react';
 
 type FormValues = DisputeFormInput;
@@ -36,11 +32,16 @@ export function DisputeForm({
 }: {
   userId: string;
   userName: string;
-  onFiled?: (d: DisputeRecord) => void;
+  onFiled?: (d: { id: string }) => void;
 }) {
   const [evidenceFile, setEvidenceFile] = useState<File | null>(null);
   const [evidenceNote, setEvidenceNote] = useState('');
   const [submitError, setSubmitError] = useState<string | null>(null);
+
+  const utils = trpc.useUtils();
+
+  const fileDisputeMut = trpc.disputes.fileDispute.useMutation();
+  const addEvidenceMut = trpc.disputes.addEvidence.useMutation();
 
   const {
     control,
@@ -68,30 +69,28 @@ export function DisputeForm({
     setSubmitError(null);
     try {
       const input = toFileDisputeInput(values);
-      // fileDispute now freezes BOTH ledgers (Soroban + Stripe) before success
-      // If either freeze fails, filing is aborted (payout integrity)
-      const d = fileDispute(input, { userId, name: userName });
-      let latest: DisputeRecord = d;
+      const d = await fileDisputeMut.mutateAsync(input);
+
       if (evidenceFile) {
         const buf = await evidenceFile.arrayBuffer();
         const sha256 = await hashEvidenceBytes(buf);
-        // addEvidence commits SHA-256 on-chain for verification (evidence commitment)
-        latest = addEvidence(
-          d.id,
-          {
+        await addEvidenceMut.mutateAsync({
+          disputeId: d.id,
+          metadata: {
             fileName: evidenceFile.name,
             mimeType: evidenceFile.type || 'application/octet-stream',
             byteSize: evidenceFile.size,
             sha256,
             note: evidenceNote.trim() || undefined,
           },
-          { userId, label: userName }
-        );
+        });
       }
+
+      utils.disputes.listDisputes.invalidate();
       reset();
       setEvidenceFile(null);
       setEvidenceNote('');
-      onFiled?.(latest);
+      onFiled?.(d);
     } catch (e) {
       setSubmitError(e instanceof Error ? e.message : 'Could not file dispute');
     }
@@ -230,8 +229,12 @@ export function DisputeForm({
         </div>
       </div>
 
-      <Button type="submit" disabled={isSubmitting} className="w-full sm:w-auto">
-        {isSubmitting ? (
+      <Button
+        type="submit"
+        disabled={isSubmitting || fileDisputeMut.isPending}
+        className="w-full sm:w-auto"
+      >
+        {isSubmitting || fileDisputeMut.isPending ? (
           <>
             <Loader2 className="mr-2 h-4 w-4 animate-spin" />
             Submitting…

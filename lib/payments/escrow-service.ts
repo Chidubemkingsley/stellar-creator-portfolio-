@@ -34,6 +34,15 @@ export interface EscrowRecord {
   appealDeadline?: string
   stripeBlocked?: boolean
   disputedPaymentIntentId?: string
+  /** Fiat-pegged settlement (from upstream) */
+  usdAmountCents?: number | null
+  lockedPriceMicroUsd?: number | null
+  usedFallbackPrice?: boolean | null
+  settlementTxHashes?: string[]
+  settlementRecoveryNote?: string | null
+  version?: number
+  releasedAt?: string
+  refundedAt?: string
 }
 
 type Store = {
@@ -66,12 +75,28 @@ export function computeFreelancerPayoutCents(amountCents: number, platformFeeCen
   return Math.max(0, amountCents - platformFeeCents)
 }
 
+export class EscrowConflictError extends Error {
+  public readonly escrowId: string;
+  public readonly expectedVersion: number;
+  constructor(escrowId: string, expectedVersion: number) {
+    super(`Escrow ${escrowId} version ${expectedVersion} was modified concurrently`);
+    this.name = 'EscrowConflictError';
+    this.escrowId = escrowId;
+    this.expectedVersion = expectedVersion;
+  }
+}
+
 export function createEscrow(params: {
   bountyId: string
   clientUserId: string
   amountCents: number
   currency?: string
   feeBps?: number
+  usdAmountCents?: number
+  lockedPriceMicroUsd?: number
+  usedFallbackPrice?: boolean
+  settlementTxHashes?: string[]
+  minXlmOut?: number
 }): EscrowRecord {
   const currency = (params.currency ?? 'usd').toLowerCase()
   const platformFeeCents = computePlatformFeeCents(params.amountCents, params.feeBps ?? 1000)
@@ -87,6 +112,11 @@ export function createEscrow(params: {
     status: 'pending_funding',
     createdAt: ts,
     updatedAt: ts,
+    usdAmountCents: params.usdAmountCents ?? null,
+    lockedPriceMicroUsd: params.lockedPriceMicroUsd ?? null,
+    usedFallbackPrice: params.usedFallbackPrice ?? null,
+    settlementTxHashes: params.settlementTxHashes ?? [],
+    version: 1,
   }
   getStore().escrows.set(id, record)
   return record
