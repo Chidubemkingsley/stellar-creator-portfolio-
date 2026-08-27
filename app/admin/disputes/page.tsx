@@ -22,9 +22,10 @@ import {
   closeDispute,
   computeDisputeAnalytics,
   DISPUTE_RESOLUTION_TEMPLATES,
+  finalizeAfterAppealWindow,
   type DisputeRecord,
 } from '@/lib/services/dispute-service';
-import { Gavel, Users, BarChart3, ArrowLeft } from 'lucide-react';
+import { Gavel, Users, BarChart3, ArrowLeft, Shield, Lock, Clock, AlertTriangle } from 'lucide-react';
 
 const STATUS_LABEL: Record<DisputeRecord['status'], string> = {
   filed: 'Filed',
@@ -42,6 +43,9 @@ export default function AdminDisputesPage() {
   const [mediationNote, setMediationNote] = useState('');
   const [resolutionExtra, setResolutionExtra] = useState('');
   const [templateId, setTemplateId] = useState(DISPUTE_RESOLUTION_TEMPLATES[0]?.id ?? '');
+  const [splitClient, setSplitClient] = useState('');
+  const [splitCreator, setSplitCreator] = useState('');
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const snapshot =
     typeof window !== 'undefined'
@@ -83,7 +87,7 @@ export default function AdminDisputesPage() {
         </h1>
         <p className="text-muted-foreground text-sm">
           Review cases, run mediation, optionally open advisory community votes, and resolve using
-          templates. Escrow actions are simulated.
+          templates. <span className="font-medium text-amber-600">Payout integrity:</span> filing freezes both Soroban and Stripe; resolution settles both ledgers atomically with on-chain appeal window (timelock).
         </p>
       </div>
 
@@ -179,9 +183,39 @@ export default function AdminDisputesPage() {
                     <span className="text-muted-foreground">Category:</span> {selected.category}
                   </p>
                   <p className="pt-2">{selected.description}</p>
-                  {selected.escrow.held && (
-                    <p className="text-amber-600 text-sm pt-2">
-                      Escrow hold (simulated): ${(selected.escrow.amountCents / 100).toFixed(2)}
+                  {selected.escrow.held ? (
+                    <div className="rounded-md bg-amber-50 border border-amber-200 p-2 mt-2 space-y-1">
+                      <p className="text-amber-800 text-sm flex items-center gap-1">
+                        <Lock className="h-3 w-3" /> Escrow hold: ${(selected.escrow.amountCents / 100).toFixed(2)} (dual-ledger freeze)
+                      </p>
+                      {selected.escrow.freezeTxHash && (
+                        <p className="text-xs text-muted-foreground">On-chain freeze: {selected.escrow.freezeTxHash.slice(0, 24)}… (sequence-safe)</p>
+                      )}
+                      {selected.escrow.evidenceHash && (
+                        <p className="text-xs text-muted-foreground flex items-center gap-1">
+                          <Shield className="h-3 w-3" /> Evidence commitment: {selected.escrow.evidenceHash.slice(0, 16)}…
+                        </p>
+                      )}
+                      {selected.escrow.appealDeadline && (
+                        <p className="text-xs text-muted-foreground flex items-center gap-1">
+                          <Clock className="h-3 w-3" /> Appeal deadline (on-chain): {new Date(selected.escrow.appealDeadline).toLocaleString()}
+                        </p>
+                      )}
+                    </div>
+                  ) : (
+                    selected.escrow.amountCents > 0 && (
+                      <p className="text-xs text-muted-foreground">Escrow amount: ${(selected.escrow.amountCents / 100).toFixed(2)} (not yet frozen - no dispute)</p>
+                    )
+                  )}
+                  {selected.resolution?.appealDeadline && selected.status === 'resolved' && (
+                    <p className="text-xs text-amber-700 mt-2 flex items-center gap-1">
+                      <Clock className="h-3 w-3" /> Appeal window active until {new Date(selected.resolution.appealDeadline).toLocaleString()} (on-chain timelock)
+                    </p>
+                  )}
+                  {selected.resolution && (
+                    <p className="text-xs mt-1">
+                      <span className="text-muted-foreground">Resolution:</span> {selected.resolution.outcome} via {selected.resolution.templateId}
+                      {selected.resolution.split && ` — split $${(selected.resolution.split.clientCents / 100).toFixed(2)} / $${(selected.resolution.split.creatorCents / 100).toFixed(2)}`}
                     </p>
                   )}
                 </div>
@@ -241,7 +275,7 @@ export default function AdminDisputesPage() {
                 </Button>
 
                 <div className="space-y-2 border-t border-border pt-4">
-                  <Label>Resolution template</Label>
+                  <Label>Resolution template (ADMIN only — on-chain + Stripe saga)</Label>
                   <Select value={templateId} onValueChange={setTemplateId}>
                     <SelectTrigger className="w-full">
                       <SelectValue placeholder="Template" />
@@ -254,28 +288,92 @@ export default function AdminDisputesPage() {
                       ))}
                     </SelectContent>
                   </Select>
+                  {templateId === 'tpl_split' && (
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="space-y-1">
+                        <Label>Client cents (split)</Label>
+                        <input
+                          className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm"
+                          placeholder={`e.g. ${Math.floor((selected.escrow.amountCents || 0) / 2)}`}
+                          value={splitClient}
+                          onChange={(e) => setSplitClient(e.target.value)}
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label>Creator cents (split)</Label>
+                        <input
+                          className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm"
+                          placeholder={`e.g. ${Math.ceil((selected.escrow.amountCents || 0) / 2)}`}
+                          value={splitCreator}
+                          onChange={(e) => setSplitCreator(e.target.value)}
+                        />
+                      </div>
+                      <p className="text-xs text-muted-foreground col-span-2">Must sum to ${(selected.escrow.amountCents / 100).toFixed(2)} — enforced both on-chain and Stripe.</p>
+                    </div>
+                  )}
                   <Textarea
                     value={resolutionExtra}
                     onChange={(e) => setResolutionExtra(e.target.value)}
                     rows={2}
                     placeholder="Optional extra context for the parties"
                   />
+                  {actionError && (
+                    <p className="text-sm text-destructive flex items-center gap-1" role="alert">
+                      <AlertTriangle className="h-3 w-3" /> {actionError}
+                    </p>
+                  )}
                   <div className="flex flex-wrap gap-2">
                     <Button
                       type="button"
                       onClick={() => {
-                        resolveDisputeWithTemplate(
-                          selected.id,
-                          templateId,
-                          'Admin',
-                          resolutionExtra.trim() || undefined
-                        );
-                        setResolutionExtra('');
-                        refresh();
+                        setActionError(null);
+                        try {
+                          const tpl = DISPUTE_RESOLUTION_TEMPLATES.find((t) => t.id === templateId);
+                          let split: { clientCents: number; creatorCents: number } | undefined;
+                          if (tpl?.outcome === 'split') {
+                            const c = parseInt(splitClient, 10);
+                            const cr = parseInt(splitCreator, 10);
+                            if (!Number.isFinite(c) || !Number.isFinite(cr)) {
+                              // default to 50/50 if not provided - handled in service
+                            } else {
+                              split = { clientCents: c, creatorCents: cr };
+                            }
+                          }
+                          resolveDisputeWithTemplate(
+                            selected.id,
+                            templateId,
+                            'Admin',
+                            resolutionExtra.trim() || undefined,
+                            { adminRole: 'ADMIN', split }
+                          );
+                          setResolutionExtra('');
+                          setSplitClient('');
+                          setSplitCreator('');
+                          refresh();
+                        } catch (e) {
+                          setActionError(e instanceof Error ? e.message : String(e));
+                        }
                       }}
                     >
-                      Apply template & resolve
+                      Apply template & resolve (dual-ledger)
                     </Button>
+                    {selected.status === 'resolved' && (
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        onClick={() => {
+                          setActionError(null);
+                          try {
+                            finalizeAfterAppealWindow(selected.id);
+                            refresh();
+                          } catch (e) {
+                            setActionError(e instanceof Error ? e.message : String(e));
+                          }
+                        }}
+                      >
+                        Finalize after appeal window
+                      </Button>
+                    )}
                     <Button
                       type="button"
                       variant="outline"
@@ -287,6 +385,7 @@ export default function AdminDisputesPage() {
                       Close case
                     </Button>
                   </div>
+                  <p className="text-xs text-muted-foreground">Resolve settles both Soroban + Stripe atomically after appeal window (on-chain timelock). Unauthorized resolve is blocked.</p>
                 </div>
 
                 <div>
