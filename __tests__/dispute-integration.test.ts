@@ -9,11 +9,15 @@ import {
   submitAppeal,
   getDisputeSnapshot,
   DISPUTE_RESOLUTION_TEMPLATES,
+  __resetOnChainStateForTests,
+  __resetStripeHoldsForTests,
 } from '@/lib/services/dispute-service';
 
 describe('dispute workflow + escrow integration', () => {
   beforeEach(() => {
     replaceDisputeSnapshotForTests({ disputes: [] });
+    __resetOnChainStateForTests();
+    __resetStripeHoldsForTests();
   });
 
   it('files a dispute, holds escrow, and records evidence', async () => {
@@ -64,10 +68,14 @@ describe('dispute workflow + escrow integration', () => {
     openCommunityVote(d.id);
     const tpl = DISPUTE_RESOLUTION_TEMPLATES[0];
     if (!tpl) throw new Error('no template');
-    resolveDisputeWithTemplate(d.id, tpl.id, 'Admin');
+    resolveDisputeWithTemplate(d.id, tpl.id, 'Admin', undefined, { adminRole: 'ADMIN' });
     const mid = getDisputeSnapshot().disputes.find((x) => x.id === d.id);
     expect(mid?.status).toBe('resolved');
-    expect(mid?.escrow.releasedAt).toBeDefined();
+    // Payout integrity: appeal window enforced on-chain as timelock, not just Postgres
+    // Funds remain locked until window expires; appealDeadline must be set
+    expect(mid?.resolution?.appealDeadline).toBeDefined();
+    expect(mid?.escrow.held).toBe(true);
+    expect(mid?.escrow.appealDeadline).toBeDefined();
 
     submitAppeal(d.id, { reason: 'New evidence surfaced after resolution.' }, 'cp-2');
     const after = getDisputeSnapshot().disputes.find((x) => x.id === d.id);

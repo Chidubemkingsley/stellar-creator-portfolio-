@@ -70,6 +70,13 @@ model User {
   matchFeedback       MatchFeedback[]
   matchNotifications  MatchNotification[]
   auditLogs           AuditLog[]
+  creatorDisputes     Dispute[]           @relation("CreatorDisputes")
+  clientDisputes      Dispute[]           @relation("ClientDisputes")
+  filedDisputes       Dispute[]           @relation("FiledDisputes")
+  adminDisputes       Dispute[]           @relation("AdminDisputes")
+  disputeEvidence     DisputeEvidence[]
+  disputeCommunityVotes DisputeCommunityVote[]
+
 
   @@index([email])
 }
@@ -349,6 +356,12 @@ model Escrow {
   clientId        String
   amount          Int
   status          String   @default("active")
+  paymentIntentId String?  // Stripe PaymentIntent id (manual capture)
+  stripeBlocked   Boolean  @default(false)
+  onChainEscrowId String?  // Soroban escrow id
+  onChainTxHash   String?
+  evidenceHash    String?
+  appealDeadline  DateTime?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
   releasedAt      DateTime?
@@ -363,6 +376,7 @@ model Escrow {
   @@index([createdAt])
   @@index([creatorId, status])
   @@index([clientId, status])
+  @@index([paymentIntentId])
 }
 
 model Balance {
@@ -390,20 +404,131 @@ model Transaction {
   @@index([type])
 }
 
+enum DisputeStatus {
+  filed
+  evidence
+  mediation
+  community_vote
+  resolved
+  appealed
+  closed
+}
+
+enum DisputeCategory {
+  payment
+  delivery
+  quality
+  communication
+  other
+}
+
 model Dispute {
-  id        String   @id @default(cuid())
-  escrowId  String
-  creatorId String
-  clientId  String
-  status    String   @default("open")
-  reason    String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id               String          @id @default(cuid())
+  escrowId         String
+  creatorId        String
+  clientId         String
+  status           DisputeStatus   @default(filed)
+  category         DisputeCategory @default(other)
+  title            String          @default("")
+  description      String          @default("")
+  reason           String?
+  escrowAmountCents Int            @default(0)
+  preventionTags   String[]
+  assignedAdminId  String?
+  filedByUserId    String
+  evidenceHash     String?         // SHA-256 hex of evidence bundle committed on-chain
+  onChainTxHash    String?         // Soroban freeze tx hash (sequence-safe)
+  stripePaymentIntentId String?    // Stripe PaymentIntent blocked
+  appealDeadline   DateTime?       // On-chain timelock
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  creator          User            @relation("CreatorDisputes", fields: [creatorId], references: [id], onDelete: Cascade)
+  client           User            @relation("ClientDisputes", fields: [clientId], references: [id], onDelete: Cascade)
+  filedBy          User            @relation("FiledDisputes", fields: [filedByUserId], references: [id], onDelete: Cascade)
+  assignedAdmin    User?           @relation("AdminDisputes", fields: [assignedAdminId], references: [id], onDelete: SetNull)
+
+  evidence         DisputeEvidence[]
+  timeline         DisputeTimelineEntry[]
+  communityVotes   DisputeCommunityVote[]
+  resolution       DisputeResolution?
+  appeal           DisputeAppeal?
 
   @@index([escrowId])
   @@index([creatorId])
   @@index([clientId])
   @@index([status])
+  @@index([filedByUserId])
+  @@index([assignedAdminId])
+}
+
+model DisputeEvidence {
+  id                String   @id @default(cuid())
+  disputeId         String
+  dispute           Dispute  @relation(fields: [disputeId], references: [id], onDelete: Cascade)
+  fileName          String
+  mimeType          String
+  byteSize          Int
+  sha256            String
+  note              String?
+  submittedByUserId String
+  submittedBy       User     @relation(fields: [submittedByUserId], references: [id], onDelete: Cascade)
+  submittedAt       DateTime @default(now())
+
+  @@index([disputeId])
+}
+
+model DisputeTimelineEntry {
+  id        String   @id @default(cuid())
+  disputeId String
+  dispute   Dispute  @relation(fields: [disputeId], references: [id], onDelete: Cascade)
+  message   String
+  at        DateTime @default(now())
+
+  @@index([disputeId])
+}
+
+model DisputeCommunityVote {
+  id        String   @id @default(cuid())
+  disputeId String
+  dispute   Dispute  @relation(fields: [disputeId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  side      String   // "client" | "creator"
+  castAt    DateTime @default(now())
+
+  @@unique([disputeId, userId])
+  @@index([disputeId])
+}
+
+model DisputeResolution {
+  id        String   @id @default(cuid())
+  disputeId String   @unique
+  dispute   Dispute  @relation(fields: [disputeId], references: [id], onDelete: Cascade)
+  outcome   String   // "favor_client" | "favor_creator" | "split" | "dismissed"
+  summary   String   @db.Text
+  templateId String?
+  resolvedBy String?
+  resolvedAt DateTime @default(now())
+  appealDeadline DateTime?
+  onChainTxHash String?
+  clientCents Int?
+  creatorCents Int?
+
+  @@index([disputeId])
+}
+
+model DisputeAppeal {
+  id         String   @id @default(cuid())
+  disputeId  String   @unique
+  dispute    Dispute  @relation(fields: [disputeId], references: [id], onDelete: Cascade)
+  status     String   @default("pending") // "pending" | "reviewed"
+  reason     String   @db.Text
+  submittedAt DateTime @default(now())
+  reviewedAt DateTime?
+  outcome    String?  // "upheld" | "denied"
+
+  @@index([disputeId])
 }
 
 // ── Audit Logging & Telemetry ────────────────────────────────────────────
