@@ -355,7 +355,10 @@ export const appRouter = router({
           },
         };
       }),
-  }),
+   }),
+
+  // Dispute endpoints (payout integrity)
+  dispute: disputeRouter,
 });
 
 export type AppRouter = typeof appRouter;

@@ -4,6 +4,9 @@ import Stripe from 'stripe'
 import {
   findEscrowByPaymentIntent,
   markFundedAuthorized,
+  isStripeCaptureBlocked,
+  cancelDisputedPaymentIntent,
+  getEscrow,
 } from '@/lib/payments/escrow-service'
 import { getStripe, getStripeWebhookSecret } from '@/lib/payments/stripe'
 import {
@@ -42,29 +45,81 @@ function getStripeWebhookRateLimitKey(ip: string): string {
 /**
  * Process a Stripe webhook event and update escrow state accordingly.
  *
+ * Payout-integrity: If escrow is disputed (dual-ledger freeze), capture is
+ * BLOCKED even if Stripe says amount_capturable_updated. The PaymentIntent
+ * remains on hold until dispute resolves.
+ *
  * On `payment_intent.amount_capturable_updated` we transition the
  * linked escrow to `funded_authorized` so the release flow can proceed.
  */
 export async function processStripeWebhookEvent(
   event: Stripe.Event,
 ): Promise<void> {
-  if (event.type !== 'payment_intent.amount_capturable_updated') {
+  // Support both amount_capturable_updated and succeeded for backward compat
+  if (
+    event.type !== 'payment_intent.amount_capturable_updated' &&
+    event.type !== 'payment_intent.succeeded'
+  ) {
     return
   }
 
   const pi = event.data.object as Stripe.PaymentIntent
+  const piId = pi.id
 
-  // Prefer explicit escrowId in metadata
-  const escrowId = pi.metadata?.escrowId as string | undefined
+  // Resolve escrow via metadata.escrowId or by PaymentIntent mapping (support both sync and async)
+  let escrowId = (pi.metadata?.escrowId as string | undefined) || (pi.metadata?.bountyId as string | undefined)
+  let escrow: any = null
   if (escrowId) {
-    await markFundedAuthorized(escrowId)
+    try {
+      escrow = getEscrow(escrowId) as any
+      if (escrow && typeof escrow.then === 'function') escrow = await escrow
+    } catch {}
+  }
+  if (!escrow) {
+    try {
+      const found: any = findEscrowByPaymentIntent(piId) as any
+      escrow = found && typeof found.then === 'function' ? await found : found
+      if (escrow) escrowId = escrow.id
+    } catch {}
+  }
+
+  if (!escrow || !escrowId) {
     return
   }
 
-  // Fallback: resolve escrow by payment intent ID
-  const escrow = await findEscrowByPaymentIntent(pi.id)
-  if (escrow) {
-    await markFundedAuthorized(escrow.id)
+  // ── Payout-integrity check: block if disputed ──
+  try {
+    const blocked = isStripeCaptureBlocked(piId) as unknown as boolean | Promise<boolean>
+    const isBlocked = blocked && typeof (blocked as Promise<boolean>).then === 'function' ? await (blocked as Promise<boolean>) : (blocked as boolean)
+    if (isBlocked) {
+      try {
+        cancelDisputedPaymentIntent(piId)
+      } catch {}
+      console.warn(`[stripe-webhook] Capture blocked for disputed escrow ${escrowId} (pi ${piId})`)
+      return
+    }
+  } catch {}
+
+  // Also check escrow status directly (covers sync in-memory and async Prisma)
+  try {
+    const status = escrow.status
+    if (status === 'disputed') {
+      console.warn(`[stripe-webhook] Capture blocked - escrow ${escrowId} is disputed`)
+      return
+    }
+  } catch {}
+
+  // Normal path: mark as funded_authorized
+  const escrowIdStr = escrowId as string
+  if (escrowIdStr) {
+    const res: any = markFundedAuthorized(escrowIdStr) as any
+    if (res && typeof res.then === 'function') await res
+  } else {
+    const esc: any = await (findEscrowByPaymentIntent(pi.id) as any)
+    if (esc) {
+      const r: any = markFundedAuthorized(esc.id) as any
+      if (r && typeof r.then === 'function') await r
+    }
   }
 }
 

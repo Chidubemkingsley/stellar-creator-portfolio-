@@ -378,6 +378,11 @@ model Escrow {
   refundedAt      DateTime?
   disputedAt      DateTime?
   disputeReason   String?
+  stripeBlocked   Boolean  @default(false)
+  onChainEscrowId String?
+  onChainTxHash   String?
+  evidenceHash    String?
+  appealDeadline  DateTime?
   version         Int      @default(1)
 
   bounty          Bounty?  @relation(fields: [bountyId], references: [id], onDelete: Cascade)
@@ -449,6 +454,10 @@ model Dispute {
   preventionTags   String[]
   assignedAdminId  String?
   filedByUserId    String
+  evidenceHash     String?         // SHA-256 hex of evidence bundle committed on-chain
+  onChainTxHash    String?         // Soroban freeze tx hash (sequence-safe)
+  stripePaymentIntentId String?    // Stripe PaymentIntent blocked
+  appealDeadline   DateTime?       // On-chain timelock
   createdAt        DateTime        @default(now())
   updatedAt        DateTime        @updatedAt
 
@@ -515,10 +524,16 @@ model DisputeResolution {
   disputeId String   @unique
   dispute   Dispute  @relation(fields: [disputeId], references: [id], onDelete: Cascade)
   outcome   String   // "favor_client" | "favor_creator" | "split" | "dismissed"
-  summary   String
+  summary   String   @db.Text
   templateId String?
   resolvedBy String?
   resolvedAt DateTime @default(now())
+  appealDeadline DateTime?
+  onChainTxHash String?
+  clientCents Int?
+  creatorCents Int?
+
+  @@index([disputeId])
 }
 
 model DisputeAppeal {
@@ -526,10 +541,12 @@ model DisputeAppeal {
   disputeId  String   @unique
   dispute    Dispute  @relation(fields: [disputeId], references: [id], onDelete: Cascade)
   status     String   @default("pending") // "pending" | "reviewed"
-  reason     String
+  reason     String   @db.Text
   submittedAt DateTime @default(now())
   reviewedAt DateTime?
   outcome    String?  // "upheld" | "denied"
+
+  @@index([disputeId])
 }
 
 // ── Audit Logging & Telemetry ────────────────────────────────────────────

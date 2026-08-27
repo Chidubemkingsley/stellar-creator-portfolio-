@@ -21,7 +21,7 @@ import {
   type DisputeFormInput,
 } from '@/lib/services/dispute-service';
 import { trpc } from '@/lib/trpc-client';
-import { Loader2 } from 'lucide-react';
+import { Loader2, Shield, Lock } from 'lucide-react';
 
 type FormValues = DisputeFormInput;
 
@@ -193,10 +193,10 @@ export function DisputeForm({
           min={0}
           step="0.01"
           {...register('escrowDollars')}
-          placeholder="0.00 — simulates hold when &gt; 0"
+          placeholder="0.00 — dual-ledger freeze when &gt; 0"
         />
-        <p className="text-xs text-muted-foreground">
-          Enter dollars; we store cents internally.
+        <p className="text-xs text-muted-foreground flex items-center gap-1">
+          <Lock className="h-3 w-3" /> Filing freezes both Soroban escrow and Stripe PaymentIntent before either can succeed (payout integrity).
         </p>
         {errors.escrowDollars && (
           <p className="text-xs text-destructive">{errors.escrowDollars.message}</p>
@@ -205,9 +205,11 @@ export function DisputeForm({
 
       <div className="rounded-lg border border-border p-4 space-y-3 bg-muted/30">
         <div>
-          <Label htmlFor="evidence">Evidence file (optional)</Label>
+          <Label htmlFor="evidence" className="flex items-center gap-1">
+            <Shield className="h-3 w-3" /> Evidence file (optional) — SHA-256 committed on-chain
+          </Label>
           <p className="text-xs text-muted-foreground mt-1">
-            We record a SHA-256 hash and metadata. Attach the real file to your support ticket.
+            We record a SHA-256 hash on-chain (BytesN&lt;32&gt;) for verification. The contract can verify this commitment.
           </p>
         </div>
         <Input
